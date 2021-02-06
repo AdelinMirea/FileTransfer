@@ -2,12 +2,13 @@ import os
 import socket
 import time
 import json
+import threading
 
 
 class FileSharingSender(object):
     """Sender class for file sharing project"""
 
-    def __init__(self, ip='localhost', port=5000, packet_size=8192):
+    def __init__(self, ip='localhost', port=5000, packet_size=8192, conn=None):
         self.port = port
         self.packet_size = packet_size
         self.ip = ip
@@ -15,7 +16,9 @@ class FileSharingSender(object):
         self.file_name = None
         self.dir_name = None
         self.home_dir = os.getcwd()
-        self.conn = None
+        self.conn = conn
+        if conn is None:
+            self.start_connection()
 
     def _send_file(self):
         """Sends a file specified by name in attribute file_name"""
@@ -50,9 +53,9 @@ class FileSharingSender(object):
             elif os.path.isdir(item):
                 dirs.append([item])
 
-        for dir in dirs:
-            os.chdir(dir[0])
-            self._send_dir_nt(dir)
+        for directory in dirs:
+            os.chdir(directory[0])
+            self._send_dir_nt(directory)
 
         for item in files + dirs:
             path.append(item)
@@ -84,7 +87,7 @@ class FileSharingSender(object):
             self._send_dir_nt(path)
             path_to_send = json.dumps(path)
 
-            self.conn.send(bytes([len(path_to_send)]))
+            self.conn.send(int(len(path_to_send)).to_bytes(3, 'big'))
             self.conn.send(path_to_send.encode())
 
             os.chdir(path[0])
@@ -92,20 +95,45 @@ class FileSharingSender(object):
         else:
             print('Unsupported yet')
 
-    def send_files(self, file_name=None):
-        """Main method to call from outside"""
+    def start_connection(self):
         self.connection.bind((self.ip, self.port))
         self.connection.listen(1)
+
+        self.wait_incoming_clients()
+
+    def read_commands(self, client):
+        command = "0"
+        while len(command) != 0:
+            command_parser = CommandParser(self, client)
+            command = client.conn.recv(1024).decode()
+            command_parser.parse(command)
+
+    def wait_incoming_clients(self):
+        while True:
+            conn, address = self.connection.accept()
+
+            client = FileSharingSender(conn=conn)
+            client.conn = conn
+            thread = threading.Thread(target=self.read_commands,
+                                      args=(client,))
+            thread.start()
+
+    def stop_connection(self):
+        self.conn.close()
+
+    def send_files(self, file_name=None):
+        """Main method to call from outside"""
 
         if file_name is None:
             self.file_name = input('filename/path to file: ')
         else:
             self.file_name = file_name
-        self.conn, address = self.connection.accept()
 
         if os.path.exists(self.file_name):
             if os.path.isdir(self.file_name):
-                agree = input('This is a folder. Do you want to send all it\'s content? (Y/N): ')
+                prompt = 'This is a folder. ' \
+                         'Do you want to send all it\'s content? (Y/N): '
+                agree = input(prompt)
                 if agree.upper() == 'Y':
                     self.conn.send(b'1')
                     self.dir_name = self.file_name
@@ -115,8 +143,12 @@ class FileSharingSender(object):
             elif os.path.isfile(self.file_name):
                 self.conn.send(b'0')
                 self._send_file()
+        else:
+            self.conn.send(b'0')
+            self.conn.send(str(len("No such file")).encode())
+            self.conn.send("No such file".encode())
 
-        self.conn.close()
+        # self.stop_connection()
 
 
 class FileSharingReceiver(object):
@@ -130,6 +162,7 @@ class FileSharingReceiver(object):
         self.dir_name = None
         self.home_dir = os.getcwd()
         self.conn = None
+        self.open_connection()
 
     def _append_to_file(self, partial_file):
         with open(self.file_name, 'ab') as file:
@@ -142,7 +175,8 @@ class FileSharingReceiver(object):
             return self.file_name
 
         name_array = name.split('.')
-        name = ''.join(['.'.join(name_array[:-1]), ' ({index}) .', name_array[-1]])
+        name = ''.join(
+            ['.'.join(name_array[:-1]), ' ({index}) .', name_array[-1]])
 
         while os.path.exists(name.format(index=index)):
             index += 1
@@ -159,7 +193,8 @@ class FileSharingReceiver(object):
 
     def _receive_file(self):
         name_len = self.connection.recv(1)
-        file_name = self.connection.recv(int.from_bytes(name_len, 'big')).decode()
+        file_name = self.connection.recv(
+            int.from_bytes(name_len, 'big')).decode()
         self._create_file_name(file_name)
 
         complete_file = []
@@ -214,7 +249,7 @@ class FileSharingReceiver(object):
                 self.connection.send(b'1')
 
     def _receive_dir(self):
-        name_len = int.from_bytes(self.connection.recv(1), 'big')
+        name_len = int.from_bytes(self.connection.recv(3), 'big')
         path = self.connection.recv(name_len).decode()
         path = json.loads(path)
 
@@ -223,8 +258,18 @@ class FileSharingReceiver(object):
         os.chdir('..')
         self._receive_files(path, files)
 
-    def receive_files(self):
+    def open_connection(self):
         self.connection.connect((self.ip, self.port))
+
+    def send_command(self, cmd):
+        self.connection.sendall(cmd.encode())
+        if cmd.startswith("get"):
+            self.receive_files()
+        if cmd.startswith("ls"):
+            output = self.connection.recv(1024).decode()
+            print(output)
+
+    def receive_files(self):
 
         item_type = self.connection.recv(1)
 
@@ -235,10 +280,39 @@ class FileSharingReceiver(object):
             # is a folder
             self._receive_dir()
 
+    def close_connection(self):
         self.connection.close()
 
 
-# todo request files (with accept or password)?
+class CommandParser(object):
+
+    def __init__(self, sender, receiver):
+        self.sender = sender
+        self.receiver = receiver
+
+    def parse(self, command):
+        command_list = command.split(" ")
+        if command_list[0] == "ls":
+            self.ls_command(command_list[1:])
+        if command_list[0] == "get":
+            self.get_command(command_list[1:])
+
+    def ls_command(self, params):
+        if len(params) != 0:
+            directory = params[0]
+            if os.path.isdir(directory):
+                os.chdir(directory)
+        try:
+            files = os.listdir()
+        except:
+            files = list()
+        self.receiver.conn.sendall(str(files).encode())
+
+    def get_command(self, params):
+        if len(params) == 0:
+            return
+        file = " ".join(params[0:])
+        self.receiver.send_files(file)
 
 if __name__ == '__main__':
 
@@ -246,11 +320,15 @@ if __name__ == '__main__':
     inp = input()
     if inp == 'send':
         fs = FileSharingSender()
-        fs.send_files()
     else:
         start = time.time()
         fs = FileSharingReceiver()
-        fs.receive_files()
+        inp = input(">")
+        while inp != "":
+            fs.send_command(inp)
+            inp = input(">")
+
         end = time.time()
+        fs.close_connection()
 
         print('Total time: ', end - start)
