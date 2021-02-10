@@ -8,7 +8,7 @@ import threading
 class FileSharingSender(object):
     """Sender class for file sharing project"""
 
-    def __init__(self, ip='localhost', port=5000, packet_size=8192, conn=None):
+    def __init__(self, ip='192.168.1.200', port=5000, packet_size=8192, conn=None):
         self.port = port
         self.packet_size = packet_size
         self.ip = ip
@@ -153,7 +153,7 @@ class FileSharingSender(object):
 
 class FileSharingReceiver(object):
 
-    def __init__(self, ip='localhost', port=5000, packet_size=8192):
+    def __init__(self, ip='192.168.1.200', port=5000, packet_size=16384):
         self.port = port
         self.packet_size = packet_size
         self.ip = ip
@@ -211,7 +211,7 @@ class FileSharingReceiver(object):
                 break
             complete_file.append(item)
 
-            if len(complete_file) > 500:
+            if len(complete_file) > 1000:
                 self._append_to_file(complete_file)
                 complete_file.clear()
 
@@ -266,8 +266,12 @@ class FileSharingReceiver(object):
         if cmd.startswith("get"):
             self.receive_files()
         if cmd.startswith("ls"):
-            output = self.connection.recv(1024).decode()
-            print(output)
+            output = self.connection.recv(102400).decode()
+            output = output.split("`")
+            print("------- Content of " + str(cmd[3:]) + ": -------") 
+            for item in output:
+                print(item)
+                
 
     def receive_files(self):
 
@@ -306,7 +310,7 @@ class CommandParser(object):
             files = os.listdir()
         except:
             files = list()
-        self.receiver.conn.sendall(str(files).encode())
+        self.receiver.conn.sendall('`'.join(files).encode())
 
     def get_command(self, params):
         if len(params) == 0:
